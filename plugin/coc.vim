@@ -1,4 +1,6 @@
 scriptencoding utf-8
+let s:is_vim = !has('nvim')
+let s:is_gvim = s:is_vim && has("gui_running")
 if exists('g:did_coc_loaded') || v:version < 800
   finish
 endif
@@ -6,40 +8,22 @@ endif
 function! s:checkVersion() abort
   let l:unsupported = 0
   if get(g:, 'coc_disable_startup_warning', 0) != 1
-    if has('nvim')
-      let l:unsupported = !has('nvim-0.4.0')
+    if s:is_vim
+      let l:unsupported = !has('patch-9.0.0438')
     else
-      let l:unsupported = !has('patch-8.1.1719')
+      let l:unsupported = !has('nvim-0.8.0')
     endif
 
     if l:unsupported == 1
       echohl Error
-      echom "coc.nvim requires at least Vim 8.1.1719 or Neovim 0.4.0, but you're using an older version."
+      echom "coc.nvim requires at least Vim 9.0.0438 or Neovim 0.8.0, but you're using an older version."
       echom "Please upgrade your (neo)vim."
       echom "You can add this to your vimrc to avoid this message:"
       echom "    let g:coc_disable_startup_warning = 1"
       echom "Note that some features may error out or behave incorrectly."
-      echom "Please do not report bugs unless you're using at least Vim 8.1.1719 or Neovim 0.4.0."
+      echom "Please do not report bugs unless you're using at least Vim 9.0.0438 or Neovim 0.8.0."
       echohl None
       sleep 2
-    else
-      if !has('nvim-0.5.0') && !has('patch-8.2.0750')
-        echohl WarningMsg
-        echom "coc.nvim works best on vim >= 8.2.0750 and neovim >= 0.5.0, consider upgrading vim."
-        echom "You can add this to your vimrc to avoid this message:"
-        echom "    let g:coc_disable_startup_warning = 1"
-        echom "Note that some features may behave incorrectly."
-        echohl None
-        sleep 2
-      elseif !has('nvim') && (!has('job') || !has('popupwin') || !has('textprop'))
-        echohl WarningMsg
-        echom "coc.nvim requires job, popupwin and textprop features of vim, consider recompile your vim."
-        echom "You can add this to your vimrc to avoid this message:"
-        echom "    let g:coc_disable_startup_warning = 1"
-        echom "Note that some features may behave incorrectly."
-        echohl None
-        sleep 2
-      endif
     endif
   endif
 endfunction
@@ -49,14 +33,15 @@ call s:checkVersion()
 let g:did_coc_loaded = 1
 let g:coc_service_initialized = 0
 let s:root = expand('<sfile>:h:h')
-let s:is_vim = !has('nvim')
-let s:is_gvim = s:is_vim && has("gui_running")
 
 if get(g:, 'coc_start_at_startup', 1) && !s:is_gvim
   call coc#rpc#start_server()
 endif
 
 function! CocTagFunc(pattern, flags, info) abort
+  " tagfunc can't be set in the sandbox mode, preload the following functions
+  silent! call coc#cursor#move_to()
+  silent! call coc#string#character_index()
   if a:flags !=# 'c'
     " use standard tag search
     return v:null
@@ -70,6 +55,8 @@ function! CocPopupCallback(bufnr, arglist) abort
     if a:arglist[0] == 'confirm'
       call coc#rpc#notify('PromptInsert', [a:arglist[1], a:bufnr])
     elseif a:arglist[0] == 'exit'
+      " notify exit for vim terminal prompt to ensure cleanup
+      call coc#rpc#notify('PromptExit', [a:bufnr])
       execute 'silent! bd! '.a:bufnr
       "call coc#rpc#notify('PromptUpdate', [a:arglist[1]])
     elseif a:arglist[0] == 'change'
@@ -184,7 +171,7 @@ function! s:InstallOptions(...)abort
 endfunction
 
 function! s:OpenConfig()
-  let home = coc#util#get_config_home()
+  let home = coc#util#get_config_home(1)
   if !isdirectory(home)
     echohl MoreMsg
     echom 'Config directory "'.home.'" does not exist, create? (y/n)'
@@ -244,7 +231,7 @@ function! s:AddAnsiGroups() abort
 endfunction
 
 function! s:CreateHighlight(group, fg, bg) abort
-  let cmd = coc#highlight#compose(a:fg, a:bg)
+  let cmd = coc#hlgroup#compose(a:fg, a:bg)
   if !empty(trim(cmd))
     exe 'hi default '.a:group.' '.cmd
   else
@@ -281,24 +268,31 @@ function! s:Autocmd(...) abort
   call coc#rpc#notify('CocAutocmd', a:000)
 endfunction
 
+function! s:HandleBufEnter(bufnr) abort
+  if s:is_vim
+    call coc#api#Buf_flush(a:bufnr)
+  endif
+  call s:Autocmd('BufEnter', a:bufnr)
+endfunction
+
 function! s:HandleCharInsert(char, bufnr) abort
-  if get(g:, 'coc_feeding_keys', 0)
-    return
-  endif
-  if get(g:, 'coc_disable_space_report', 0)
-    let g:coc_disable_space_report = 0
-    if a:char ==# ' '
-      return
-    endif
-  endif
   call s:Autocmd('InsertCharPre', a:char, a:bufnr)
 endfunction
 
-function! s:HandleTextChangedI(bufnr) abort
-  if get(g:, 'coc_feeding_keys', 0)
-    unlet g:coc_feeding_keys
+function! s:HandleTextChangedI(event, bufnr) abort
+  if s:is_vim
+    " make sure lines event before changed event.
+    call coc#api#Buf_flush(a:bufnr)
   endif
-  call s:Autocmd('TextChangedI', a:bufnr, coc#util#change_info())
+  call s:Autocmd(a:event, a:bufnr, coc#util#change_info())
+endfunction
+
+function! s:HandleTextChanged(bufnr) abort
+  if s:is_vim
+    " make sure lines event before changed event.
+    call coc#api#Buf_flush(a:bufnr)
+  endif
+  call s:Autocmd('TextChanged', a:bufnr, getbufvar(a:bufnr, 'changedtick'))
 endfunction
 
 function! s:HandleInsertLeave(bufnr) abort
@@ -306,11 +300,32 @@ function! s:HandleInsertLeave(bufnr) abort
   call s:Autocmd('InsertLeave', a:bufnr)
 endfunction
 
-function! s:HandleWinScrolled(winid) abort
+function! s:HandleWinScrolled(winid, event) abort
   if getwinvar(a:winid, 'float', 0)
     call coc#float#nvim_scrollbar(a:winid)
   endif
-  call s:Autocmd('WinScrolled', a:winid)
+  if !empty(a:event)
+    let opt = get(a:event, 'all', {})
+    if get(opt, 'topline', 0) == 0 && get(opt, 'height', 0) == 0
+      " visible region not changed.
+      return
+    endif
+    for key in keys(a:event)
+      let winid = str2nr(key)
+      if winid != 0
+        let info = getwininfo(winid)
+        if !empty(info)
+          call s:Autocmd('WinScrolled', winid, info[0]['bufnr'], [info[0]['topline'], info[0]['botline']])
+        endif
+      endif
+    endfor
+  else
+    " v:event not exists on old version vim9
+    let info = getwininfo(a:winid)
+    if !empty(info)
+      call s:Autocmd('WinScrolled', a:winid, info[0]['bufnr'], [info[0]['topline'], info[0]['botline']])
+    endif
+  endif
 endfunction
 
 function! s:HandleWinClosed(winid) abort
@@ -345,7 +360,7 @@ endfunction
 function! s:VimEnter() abort
   if coc#rpc#started()
     if !exists('$COC_NVIM_REMOTE_ADDRESS')
-      call coc#rpc#notify('VimEnter', [coc#util#path_replace_patterns(), join(globpath(&runtimepath, "", 0, 1), ",")])
+      call coc#rpc#notify('VimEnter', [join(coc#compat#list_runtime_paths(), ",")])
     endif
   elseif get(g:, 'coc_start_at_startup', 1)
     call coc#rpc#start_server()
@@ -363,7 +378,7 @@ function! s:Enable(initialize)
   sign define CocListCurrent linehl=CocListLine
   sign define CocTreeSelected linehl=CocTreeSelected
   if s:is_vim
-    call coc#api#tabpage_ids()
+    call coc#api#Tabpage_ids()
   endif
 
   augroup coc_nvim
@@ -382,14 +397,14 @@ function! s:Enable(initialize)
         autocmd TerminalOpen      * call s:Autocmd('TermOpen', +expand('<abuf>'))
       endif
       autocmd CursorMoved         list:///* call coc#list#select(bufnr('%'), line('.'))
-      autocmd TabNew              * call coc#api#tabpage_ids()
+      autocmd TabNew              * call coc#api#Tabpage_ids()
     else
       autocmd DirChanged        * call s:Autocmd('DirChanged', get(v:event, 'cwd', ''))
       autocmd TermOpen          * call s:Autocmd('TermOpen', +expand('<abuf>'))
       autocmd WinEnter          * call coc#float#nvim_win_enter(win_getid())
     endif
     if exists('##CompleteChanged')
-      autocmd CompleteChanged   * call timer_start(1, { -> coc#pum#close()})
+      autocmd CompleteChanged   * call timer_start(1, { -> execute('if pumvisible() | call coc#pum#close() | endif')})
     endif
     autocmd CursorHold          * call coc#float#check_related()
     if exists('##WinClosed')
@@ -398,30 +413,29 @@ function! s:Enable(initialize)
       autocmd TabEnter          * call coc#notify#reflow()
     endif
     if exists('##WinScrolled')
-      autocmd WinScrolled       * call s:HandleWinScrolled(+expand('<amatch>'))
+      autocmd WinScrolled         * call s:HandleWinScrolled(+expand('<amatch>'), v:event)
     endif
-    autocmd TabNew              * call s:Autocmd('TabNew', coc#util#tabnr_id(tabpagenr()))
-    autocmd TabClosed           * call s:Autocmd('TabClosed', coc#util#tabpages())
+    autocmd ModeChanged         * call s:Autocmd('ModeChanged', v:event)
+    autocmd TabNew              * call s:Autocmd('TabNew', coc#compat#tabnr_id(tabpagenr()))
+    autocmd TabClosed           * call s:Autocmd('TabClosed', coc#compat#call('list_tabpages', []))
     autocmd WinLeave            * call s:Autocmd('WinLeave', win_getid())
     autocmd WinEnter            * call s:Autocmd('WinEnter', win_getid())
     autocmd BufWinLeave         * call s:Autocmd('BufWinLeave', +expand('<abuf>'), bufwinid(+expand('<abuf>')))
-    autocmd BufWinEnter         * call s:Autocmd('BufWinEnter', +expand('<abuf>'), win_getid())
+    autocmd BufWinEnter         * call s:Autocmd('BufWinEnter', +expand('<abuf>'), win_getid(), coc#window#visible_range(win_getid()))
     autocmd FileType            * call s:Autocmd('FileType', expand('<amatch>'), +expand('<abuf>'))
     autocmd InsertCharPre       * call s:HandleCharInsert(v:char, bufnr('%'))
-    if exists('##TextChangedP')
-      autocmd TextChangedP      * call s:Autocmd('TextChangedP', +expand('<abuf>'), coc#util#change_info())
-    endif
-    autocmd TextChangedI        * call s:HandleTextChangedI(+expand('<abuf>'))
+    autocmd TextChangedP        * call s:HandleTextChangedI('TextChangedP', +expand('<abuf>'))
+    autocmd TextChangedI        * call s:HandleTextChangedI('TextChangedI', +expand('<abuf>'))
+    autocmd TextChanged         * call s:HandleTextChanged(+expand('<abuf>'))
     autocmd InsertLeave         * call s:HandleInsertLeave(+expand('<abuf>'))
+    autocmd BufEnter            * call s:HandleBufEnter(+expand('<abuf>'))
     autocmd InsertEnter         * call s:Autocmd('InsertEnter', +expand('<abuf>'))
     autocmd BufHidden           * call s:Autocmd('BufHidden', +expand('<abuf>'))
-    autocmd BufEnter            * call s:Autocmd('BufEnter', +expand('<abuf>'))
-    autocmd TextChanged         * call s:Autocmd('TextChanged', +expand('<abuf>'), getbufvar(+expand('<abuf>'), 'changedtick'))
     autocmd BufWritePost        * call s:Autocmd('BufWritePost', +expand('<abuf>'), getbufvar(+expand('<abuf>'), 'changedtick'))
     autocmd CursorMoved         * call s:Autocmd('CursorMoved', +expand('<abuf>'), [line('.'), col('.')])
     autocmd CursorMovedI        * call s:Autocmd('CursorMovedI', +expand('<abuf>'), [line('.'), col('.')])
-    autocmd CursorHold          * call s:Autocmd('CursorHold', +expand('<abuf>'), [line('.'), col('.')])
-    autocmd CursorHoldI         * call s:Autocmd('CursorHoldI', +expand('<abuf>'), [line('.'), col('.')])
+    autocmd CursorHold          * call s:Autocmd('CursorHold', +expand('<abuf>'), [line('.'), col('.')], win_getid())
+    autocmd CursorHoldI         * call s:Autocmd('CursorHoldI', +expand('<abuf>'), [line('.'), col('.')], win_getid())
     autocmd BufNewFile,BufReadPost * call s:Autocmd('BufCreate', +expand('<abuf>'))
     autocmd BufUnload           * call s:Autocmd('BufUnload', +expand('<abuf>'))
     autocmd BufWritePre         * call s:SyncAutocmd('BufWritePre', +expand('<abuf>'), bufname(+expand('<abuf>')), getbufvar(+expand('<abuf>'), 'changedtick'))
@@ -470,6 +484,7 @@ function! s:StaticHighlight() abort
   " Notification
   hi default CocNotificationProgress  ctermfg=Blue    guifg=#15aabf guibg=NONE
   hi default link CocNotificationButton  CocUnderline
+  hi default link CocNotificationKey     Comment
   hi default link CocNotificationError   CocErrorFloat
   hi default link CocNotificationWarning CocWarningFloat
   hi default link CocNotificationInfo    CocInfoFloat
@@ -493,35 +508,43 @@ function! s:StaticHighlight() abort
   hi default link CocPumVirtualText        CocVirtualText
   hi default link CocInputBoxVirtualText   CocVirtualText
   hi default link CocFloatDividingLine     CocVirtualText
+  if &t_Co == 256
+    hi def CocInlineVirtualText guifg=#808080 ctermfg=244
+  else
+    hi def CocInlineVirtualText guifg=#808080 ctermfg=12
+  endif
+  hi def link CocInlineAnnotation MoreMsg
 endfunction
 
 call s:StaticHighlight()
 call s:AddAnsiGroups()
 
 function! s:Highlight() abort
-  if coc#highlight#get_contrast('Normal', has('nvim') ? 'NormalFloat' : 'Pmenu') > 2.0
-    exe 'hi default CocFloating '.coc#highlight#create_bg_command('Normal', &background ==# 'dark' ? -30 : 30)
-    exe 'hi default CocMenuSel '.coc#highlight#create_bg_command('CocFloating', &background ==# 'dark' ? -20 : 20)
-    exe 'hi default CocFloatThumb '.coc#highlight#create_bg_command('CocFloating', &background ==# 'dark' ? -40 : 40)
+  let normalFloat = s:is_vim ? 'Pmenu' : 'NormalFloat'
+  if coc#hlgroup#get_contrast('Normal', normalFloat) > 2.0
+    exe 'hi default CocFloating '.coc#hlgroup#create_bg_command('Normal', &background ==# 'dark' ? -30 : 30)
+    exe 'hi default CocMenuSel '.coc#hlgroup#create_bg_command('CocFloating', &background ==# 'dark' ? -20 : 20)
+    exe 'hi default CocFloatThumb '.coc#hlgroup#create_bg_command('CocFloating', &background ==# 'dark' ? -40 : 40)
     hi default link CocFloatSbar CocFloating
   else
-    exe 'hi default link CocFloating '.(has('nvim') ? 'NormalFloat' : 'Pmenu')
-    if coc#highlight#get_contrast('CocFloating', 'PmenuSel') > 2.0
-      exe 'hi default CocMenuSel '.coc#highlight#create_bg_command('CocFloating', &background ==# 'dark' ? -30 : 30)
+    exe 'hi default link CocFloating '.normalFloat
+    if coc#hlgroup#get_contrast('CocFloating', 'PmenuSel') > 2.0
+      exe 'hi default CocMenuSel '.coc#hlgroup#create_bg_command('CocFloating', &background ==# 'dark' ? -30 : 30)
     else
-      exe 'hi default CocMenuSel '.coc#highlight#get_hl_command(synIDtrans(hlID('PmenuSel')), 'bg', '237', '#13354A')
+      exe 'hi default CocMenuSel '.coc#hlgroup#get_hl_command(synIDtrans(hlID('PmenuSel')), 'bg', '237', '#13354A')
     endif
     hi default link CocFloatThumb        PmenuThumb
     hi default link CocFloatSbar         PmenuSbar
   endif
-  if coc#highlight#get_contrast('Normal', 'CursorLine') < 1.3
+  exe 'hi default link CocFloatBorder ' .. (hlexists('FloatBorder') ? 'FloatBorder' : 'CocFloating')
+  if coc#hlgroup#get_contrast('Normal', 'CursorLine') < 1.3
     " Avoid color too close
-    exe 'hi default CocListLine '.coc#highlight#create_bg_command('Normal', &background ==# 'dark' ? -20 : 20)
+    exe 'hi default CocListLine '.coc#hlgroup#create_bg_command('Normal', &background ==# 'dark' ? -20 : 20)
   else
     hi default link CocListLine            CursorLine
   endif
 
-  if has('nvim-0.5.0')
+  if !s:is_vim
     hi default CocCursorTransparent gui=strikethrough blend=100
   endif
 
@@ -591,7 +614,7 @@ function! s:Highlight() abort
     for [key, value] in items(hlMap)
       let ts = get(value, 0, '')
       let fallback = get(value, 1, '')
-      execute 'hi default link CocSem'.key.' '.(coc#highlight#valid(ts) ? ts : fallback)
+      execute 'hi default link CocSem'.key.' '.(coc#hlgroup#valid(ts) ? ts : fallback)
     endfor
   endif
   let symbolMap = {
@@ -631,9 +654,9 @@ function! s:Highlight() abort
       \ 'TypeParameter': ['@variable.parameter', 'Identifier'],
       \ }
   for [key, value] in items(symbolMap)
-    let hlGroup = coc#highlight#valid(value[0]) ? value[0] : get(value, 1, 'CocSymbolDefault')
+    let hlGroup = coc#hlgroup#valid(value[0]) ? value[0] : get(value, 1, 'CocSymbolDefault')
     if hlexists(hlGroup)
-      execute 'hi default CocSymbol'.key.' '.coc#highlight#get_hl_command(synIDtrans(hlID(hlGroup)), 'fg', '223', '#ebdbb2')
+      execute 'hi default CocSymbol'.key.' '.coc#hlgroup#get_hl_command(synIDtrans(hlID(hlGroup)), 'fg', '223', '#ebdbb2')
     endif
   endfor
 endfunction
@@ -718,30 +741,33 @@ command! -nargs=* -bar -complete=custom,s:InstallOptions CocInstall   :call coc#
 
 call s:Enable(1)
 augroup coc_dynamic_autocmd
+  autocmd!
 augroup END
 augroup coc_dynamic_content
+  autocmd!
 augroup END
 augroup coc_dynamic_option
+  autocmd!
 augroup END
 
 " Default key-mappings for completion
 if empty(mapcheck('<C-n>', 'i'))
-  inoremap <silent><expr> <C-n> coc#pum#visible() ? coc#pum#next(1) : "\<C-n>"
+  inoremap <silent><expr> <C-n> coc#pum#visible() ? coc#pum#next(1) : coc#inline#visible() ? coc#inline#next() : "\<C-n>"
 endif
 if empty(mapcheck('<C-p>', 'i'))
-  inoremap <silent><expr> <C-p> coc#pum#visible() ? coc#pum#prev(1) : "\<C-p>"
+  inoremap <silent><expr> <C-p> coc#pum#visible() ? coc#pum#prev(1) : coc#inline#visible() ? coc#inline#prev() : "\<C-p>"
 endif
 if empty(mapcheck('<down>', 'i'))
-  inoremap <silent><expr> <down> coc#pum#visible() ? coc#pum#next(0) : "\<down>"
+  inoremap <silent><expr> <down> coc#pum#visible() ? coc#pum#next(0) : coc#inline#visible() ? coc#inline#next() :"\<down>"
 endif
 if empty(mapcheck('<up>', 'i'))
-  inoremap <silent><expr> <up> coc#pum#visible() ? coc#pum#prev(0) : "\<up>"
+  inoremap <silent><expr> <up> coc#pum#visible() ? coc#pum#prev(0) : coc#inline#visible() ? coc#inline#prev() :"\<up>"
 endif
 if empty(mapcheck('<C-e>', 'i'))
-  inoremap <silent><expr> <C-e> coc#pum#visible() ? coc#pum#cancel() : "\<C-e>"
+  inoremap <silent><expr> <C-e> coc#pum#visible() ? coc#pum#cancel() : coc#inline#visible() ? coc#inline#cancel() : "\<C-e>"
 endif
 if empty(mapcheck('<C-y>', 'i'))
-  inoremap <silent><expr> <C-y> coc#pum#visible() ? coc#pum#confirm() : "\<C-y>"
+  inoremap <silent><expr> <C-y> coc#pum#visible() ? coc#pum#confirm() : coc#inline#visible() ? coc#inline#accept() :"\<C-y>"
 endif
 if empty(mapcheck('<PageDown>', 'i'))
   inoremap <silent><expr> <PageDown> coc#pum#visible() ? coc#pum#scroll(1) : "\<PageDown>"

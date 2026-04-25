@@ -4,10 +4,11 @@ let s:is_vim = !has('nvim')
 " Get tabpagenr of winid, return -1 if window doesn't exist
 function! coc#window#tabnr(winid) abort
   " getwininfo not work with popup on vim
-  if exists('*win_execute')
-    let ref = {}
-    call win_execute(a:winid, 'let ref["out"] = tabpagenr()')
-    return get(ref, 'out', -1)
+  if s:is_vim && index(popup_list(), a:winid) != -1
+    call win_execute(a:winid, 'let g:__coc_tabnr = tabpagenr()')
+    let nr = g:__coc_tabnr
+    unlet g:__coc_tabnr
+    return nr
   endif
   let info = getwininfo(a:winid)
   return empty(info) ? -1 : info[0]['tabnr']
@@ -18,11 +19,8 @@ function! coc#window#get_cursor(winid) abort
   if exists('*nvim_win_get_cursor')
     return nvim_win_get_cursor(a:winid)
   endif
-  if has('patch-8.2.1727')
-    let pos = getcurpos(a:winid)
-    return [pos[1], pos[2] - 1]
-  endif
-  return coc#api#exec('win_get_cursor', [a:winid])
+  let pos = getcurpos(a:winid)
+  return [pos[1], pos[2] - 1]
 endfunction
 
 " Check if winid visible on current tabpage
@@ -37,80 +35,51 @@ function! coc#window#visible(winid) abort
     catch /^Vim\%((\a\+)\)\=:E993/
       return 1
     endtry
+  else
+    if !nvim_win_is_valid(a:winid)
+      return 0
+    endif
+    return coc#window#tabnr(a:winid) == tabpagenr()
   endif
-  if !nvim_win_is_valid(a:winid)
-    return 0
-  endif
-  return coc#window#tabnr(a:winid) == tabpagenr()
 endfunction
 
 " winid is popup and shown
 function! s:visible_popup(winid) abort
-  let popups = popup_list()
-  if index(popups, a:winid) != -1
+  if index(popup_list(), a:winid) != -1
     return get(popup_getpos(a:winid), 'visible', 0) == 1
   endif
   return 0
 endfunction
 
-" Return v:null when name or window doesn't exist,
+" Return default or v:null when name or window doesn't exist,
 " 'getwinvar' only works on window of current tab
 function! coc#window#get_var(winid, name, ...) abort
-  if !s:is_vim
-    try
-      if a:name =~# '^&'
-        if has('nvim-0.10')
-          return nvim_get_option_value(a:name[1:], {'win': a:winid})
-        else
-          return nvim_win_get_option(a:winid, a:name[1:])
-        endif
-      else
-        return nvim_win_get_var(a:winid, a:name)
-      endif
-    catch /E5555/
-      return get(a:, 1, v:null)
-    endtry
-  else
-    try
-      return coc#api#exec('win_get_var', [a:winid, a:name, get(a:, 1, v:null)])
-    catch /Invalid window id/
-      return get(a:, 1, v:null)
-    endtry
+  let tabnr = coc#window#tabnr(a:winid)
+  if tabnr == -1
+    return get(a:, 1, v:null)
   endif
+  return gettabwinvar(tabnr, a:winid, a:name, get(a:, 1, v:null))
 endfunction
 
 " Not throw like setwinvar
 function! coc#window#set_var(winid, name, value) abort
-  try
-    if !s:is_vim
-      if a:name =~# '^&'
-        if has('nvim-0.10')
-          call nvim_set_option_value(a:name[1:], a:value, {'win': a:winid})
-        else
-          call nvim_win_set_option(a:winid, a:name[1:], a:value)
-        endif
-      else
-        call nvim_win_set_var(a:winid, a:name, a:value)
-      endif
-    else
-      call coc#api#exec('win_set_var', [a:winid, a:name, a:value])
-    endif
-  catch /Invalid window id/
-    " ignore
-  endtry
+  let tabnr = coc#window#tabnr(a:winid)
+  if tabnr == -1
+    return
+  endif
+  call settabwinvar(tabnr, a:winid, a:name, a:value)
 endfunction
 
 function! coc#window#is_float(winid) abort
   if s:is_vim
-    try
-      return !empty(popup_getpos(a:winid))
-    catch /^Vim\%((\a\+)\)\=:E993/
-      return 0
-    endtry
+    return index(popup_list(), a:winid) != -1
   else
-    let config = nvim_win_get_config(a:winid)
-    return !empty(config) && !empty(get(config, 'relative', ''))
+    if nvim_win_is_valid(a:winid)
+      let config = nvim_win_get_config(a:winid)
+      return !empty(get(config, 'relative', ''))
+    endif
   endif
+  return 0
 endfunction
 
 " Reset current lnum & topline of window
@@ -122,17 +91,21 @@ function! coc#window#restview(winid, lnum, topline) abort
     call popup_setoptions(a:winid, {'firstline': a:topline})
     return
   endif
-  call coc#compat#execute(a:winid, ['noa call winrestview({"lnum":'.a:lnum.',"topline":'.a:topline.'})'])
+  call win_execute(a:winid, ['noa call winrestview({"lnum":'.a:lnum.',"topline":'.a:topline.'})'])
 endfunction
 
 function! coc#window#set_height(winid, height) abort
   if empty(getwininfo(a:winid))
     return
   endif
-  if exists('*nvim_win_set_height')
+  if !s:is_vim
     call nvim_win_set_height(a:winid, a:height)
   else
-    call coc#compat#execute(a:winid, 'noa resize '.a:height, 'silent')
+    if coc#window#is_float(a:winid)
+      call popup_move(a:winid, {'minheight': a:height, 'maxheight': a:height})
+    else
+      call win_execute(a:winid, 'noa resize '.a:height)
+    endif
   endif
 endfunction
 
@@ -142,7 +115,7 @@ function! coc#window#adjust_width(winid) abort
     let maxwidth = 0
     let lines = getbufline(bufnr, 1, '$')
     if len(lines) > 2
-      call coc#compat#execute(a:winid, 'setl nowrap')
+      call win_execute(a:winid, 'setl nowrap')
       for line in lines
         let w = strwidth(line)
         if w > maxwidth
@@ -151,7 +124,7 @@ function! coc#window#adjust_width(winid) abort
       endfor
     endif
     if maxwidth > winwidth(a:winid)
-      call coc#compat#execute(a:winid, 'vertical resize '.min([maxwidth, g:coc_max_treeview_width]))
+      call win_execute(a:winid, 'vertical resize '.min([maxwidth, g:coc_max_treeview_width]))
     endif
   endif
 endfunction
@@ -169,13 +142,18 @@ endfunction
 
 " Visible buffer numbers
 function! coc#window#bufnrs() abort
-  let winids = []
-  if exists('*nvim_list_wins')
-    let winids = nvim_list_wins()
-  else
-    let winids = map(getwininfo(), 'v:val["winid"]')
-  endif
+  let winids = map(getwininfo(), 'v:val["winid"]')
   return uniq(map(winids, 'winbufnr(v:val)'))
+endfunction
+
+function! coc#window#buf_winid(bufnr) abort
+  let winids = map(getwininfo(), 'v:val["winid"]')
+  for winid in winids
+    if winbufnr(winid) == a:bufnr
+      return winid
+    endif
+  endfor
+  return -1
 endfunction
 
 " Avoid errors
@@ -183,25 +161,19 @@ function! coc#window#close(winid) abort
   if empty(a:winid) || a:winid == -1
     return
   endif
-  if coc#float#valid(a:winid)
+  if coc#window#is_float(a:winid)
     call coc#float#close(a:winid)
     return
   endif
-  if exists('*nvim_win_is_valid') && exists('*nvim_win_close')
-    if nvim_win_is_valid(a:winid)
-      call nvim_win_close(a:winid, 1)
-    endif
-  else
-    call coc#compat#execute(a:winid, 'noa close!', 'silent!')
-  endif
+  call win_execute(a:winid, 'noa close!', 'silent!')
 endfunction
 
-function! coc#window#visible_range(bufnr) abort
-  let winid = bufwinid(a:bufnr)
-  if winid == -1
+function! coc#window#visible_range(winid) abort
+  let winid = a:winid == 0 ? win_getid() : a:winid
+  let info = get(getwininfo(winid), 0, v:null)
+  if empty(info)
     return v:null
   endif
-  let info = getwininfo(winid)[0]
   return [info['topline'], info['botline']]
 endfunction
 
@@ -215,4 +187,29 @@ function! coc#window#visible_ranges(bufnr) abort
     endif
   endfor
   return res
+endfunction
+
+" Clear matches by hlGroup regexp.
+function! coc#window#clear_match_group(winid, match) abort
+  let winid = a:winid == 0 ? win_getid() : a:winid
+  if !empty(getwininfo(winid))
+    let arr = filter(getmatches(winid), 'v:val["group"] =~# "'.a:match.'"')
+    for item in arr
+      call matchdelete(item['id'], winid)
+    endfor
+  endif
+endfunction
+
+" Clear matches by match ids, use 0 for current win.
+function! coc#window#clear_matches(winid, ids) abort
+  let winid = a:winid == 0 ? win_getid() : a:winid
+  if !empty(getwininfo(winid))
+    for id in a:ids
+      try
+        call matchdelete(id, winid)
+      catch /^Vim\%((\a\+)\)\=:E803/
+        " ignore
+      endtry
+    endfor
+  endif
 endfunction

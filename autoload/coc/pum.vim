@@ -8,9 +8,6 @@ let s:pum_size = 0
 let s:inserted = 0
 let s:virtual_text = 0
 let s:virtual_text_ns = coc#highlight#create_namespace('pum-virtual')
-let s:ignore = s:is_vim || has('nvim-0.5.0') ? "\<Ignore>" : "\<space>\<bs>"
-let s:hide_pum = has('nvim-0.6.1') || has('patch-8.2.3389')
-let s:virtual_text_support = has('nvim-0.5.0') || has('patch-9.0.0067')
 " bufnr, &indentkeys
 let s:saved_indenetkeys = []
 let s:saved_textwidth = []
@@ -19,11 +16,15 @@ let s:reversed = 0
 let s:check_hl_group = 0
 let s:start_col = -1
 
-if s:is_vim && s:virtual_text_support
+if s:is_vim
   if empty(prop_type_get('CocPumVirtualText'))
     call prop_type_add('CocPumVirtualText', {'highlight': 'CocPumVirtualText'})
   endif
 endif
+
+function! coc#pum#has_item_selected() abort
+    return coc#pum#visible() && s:pum_index != -1
+endfunction
 
 function! coc#pum#visible() abort
   if s:pum_winid == -1
@@ -44,28 +45,33 @@ function! coc#pum#close_detail() abort
   endif
 endfunction
 
+" kind, and skipRequest (default to false)
 function! coc#pum#close(...) abort
   if coc#pum#visible()
+    let inserted = 0
     let kind = get(a:, 1, '')
     if kind ==# 'cancel'
       let input = getwinvar(s:pum_winid, 'input', '')
       let s:pum_index = -1
-      call s:insert_word(input, 1)
+      let inserted = s:insert_word(input, 1)
       call s:on_pum_change(0)
-      doautocmd <nomodeline> TextChangedI
     elseif kind ==# 'confirm'
       let words = getwinvar(s:pum_winid, 'words', [])
       if s:pum_index >= 0
         let word = get(words, s:pum_index, '')
-        call s:insert_word(word, 1)
+        let inserted = s:insert_word(word, 1)
         " have to restore here, so that TextChangedI can trigger indent.
         call s:restore_indentkeys()
       endif
-      doautocmd <nomodeline> TextChangedI
     endif
     call s:close_pum()
     if !get(a:, 2, 0)
-      call coc#rpc#request('CompleteStop', [kind])
+      " Needed to wait TextChangedI fired
+      if inserted
+        call timer_start(0, {-> coc#rpc#request('stopCompletion', [kind])})
+      else
+        call coc#rpc#request('stopCompletion', [kind])
+      endif
     endif
   endif
   return ''
@@ -77,7 +83,8 @@ function! coc#pum#select_confirm() abort
       let s:pum_index = 0
       call s:on_pum_change(0)
     endif
-    call coc#pum#close('confirm')
+    " Avoid change of text not allowed
+    return "\<C-r>=coc#pum#close('confirm')\<CR>"
   endif
   return ''
 endfunction
@@ -85,6 +92,9 @@ endfunction
 function! coc#pum#_close() abort
   if coc#pum#visible()
     call s:close_pum()
+    if s:is_vim
+      call timer_start(0, {-> execute('redraw')})
+    endif
   endif
 endfunction
 
@@ -98,7 +108,7 @@ function! coc#pum#_one_more() abort
     if !empty(word) && strcharpart(word, 0, strchars(input)) ==# input
       let ch = strcharpart(word, strchars(input), 1)
       if !empty(ch)
-        call feedkeys(ch, "int")
+        call feedkeys(ch, "nt")
       endif
     endif
   endif
@@ -115,7 +125,7 @@ function! coc#pum#_insert() abort
     endif
     doautocmd <nomodeline> TextChangedI
     call s:close_pum()
-    call coc#rpc#request('CompleteStop', [''])
+    call timer_start(0, {-> coc#rpc#request('stopCompletion', [''])})
   endif
   return ''
 endfunction
@@ -159,9 +169,15 @@ function! coc#pum#select(index, insert, confirm) abort
     if a:index < 0 || a:index >= s:pum_size
       throw 'index out of range ' . a:index
     endif
-    call s:select_by_index(a:index, a:insert)
     if a:confirm
+      if s:pum_index != a:index
+        let s:pum_index = a:index
+        let s:inserted = 1
+        call s:on_pum_change(0)
+      endif
       call coc#pum#close('confirm')
+    else
+      call s:select_by_index(a:index, a:insert)
     endif
   endif
   return ''
@@ -214,14 +230,14 @@ function! coc#pum#scroll(forward) abort
     endif
   endif
   " Required on old version vim/neovim.
-  return s:ignore
+  return "\<Ignore>"
 endfunction
 
 function! s:get_height(winid) abort
-  if has('nvim')
-    return nvim_win_get_height(a:winid)
+  if s:is_vim
+    return get(popup_getpos(a:winid), 'core_height', 0)
   endif
-  return get(popup_getpos(a:winid), 'core_height', 0)
+  return nvim_win_get_height(a:winid)
 endfunction
 
 function! s:scroll_pum(forward, height, size) abort
@@ -253,13 +269,12 @@ function! s:scroll_pum(forward, height, size) abort
 endfunction
 
 function! s:get_topline(winid) abort
-  if has('nvim')
-    let info = getwininfo(a:winid)[0]
-    return info['topline']
-  else
+  if s:is_vim
     let pos = popup_getpos(a:winid)
     return pos['firstline']
   endif
+  let info = getwininfo(a:winid)[0]
+  return info['topline']
 endfunction
 
 function! coc#pum#_navigate(next, insert) abort
@@ -267,7 +282,7 @@ function! coc#pum#_navigate(next, insert) abort
     call s:save_indentkeys()
     let index = s:get_index(a:next)
     call s:select_by_index(index, a:insert)
-    call coc#rpc#notify('PumNavigate', [])
+    call coc#rpc#notify('PumNavigate', [bufnr('%')])
   endif
   return ''
 endfunction
@@ -279,7 +294,7 @@ function! s:select_by_index(index, insert) abort
     call coc#float#nvim_scrollbar(s:pum_winid)
   endif
   if a:insert
-    let s:inserted = 1
+    let s:inserted = a:index >= 0
     if a:index < 0
       let input = getwinvar(s:pum_winid, 'input', '')
       call s:insert_word(input, 0)
@@ -288,10 +303,6 @@ function! s:select_by_index(index, insert) abort
       let words = getwinvar(s:pum_winid, 'words', [])
       let word = get(words, a:index, '')
       call s:insert_word(word, 0)
-    endif
-    " The current line is wrong when use feedkeys.
-    if !s:is_vim
-      doautocmd <nomodeline> TextChangedP
     endif
   endif
   call s:on_pum_change(1)
@@ -308,56 +319,36 @@ endfunction
 
 function! s:insert_word(word, finish) abort
   if s:start_col != -1 && mode() ==# 'i'
-    " avoid auto wrap using 'textwidth'
-    if !a:finish && &textwidth > 0
-      let textwidth = &textwidth
-      noa setl textwidth=0
-      call timer_start(0, { -> execute('noa setl textwidth='.textwidth)})
-    endif
-    " should not be used on finish to have correct line.
-    if s:is_vim && !a:finish
-      call coc#pum#repalce(s:start_col + 1, a:word, 1)
-    else
-      let saved_completeopt = &completeopt
-      noa set completeopt=menu
-      noa call complete(s:start_col + 1, [{ 'empty': v:true, 'word': a:word }])
-      " exit complete state
-      if s:hide_pum
-        call feedkeys("\<C-x>\<C-z>", 'in')
-      else
-        let g:coc_disable_space_report = 1
-        call feedkeys("\<space>\<bs>", 'in')
+    " Not insert same characters
+    let inserted = strpart(getline('.'), s:start_col, col('.') - 1)
+    if inserted !=# a:word
+      " avoid auto wrap using 'textwidth'
+      if !a:finish && &textwidth > 0
+        let textwidth = &textwidth
+        noa setl textwidth=0
+        call timer_start(0, { -> execute('noa setl textwidth='.textwidth)})
       endif
-      execute 'noa set completeopt='.saved_completeopt
+      let saved_completeopt = &completeopt
+      noa set completeopt=noinsert,noselect
+      noa call complete(s:start_col + 1, [{ 'empty': v:true, 'word': a:word }])
+      noa call feedkeys("\<C-n>\<C-x>\<C-z>", 'in')
+      call timer_start(0, { -> execute('noa set completeopt='.saved_completeopt)})
+      return 1
     endif
   endif
+  return 0
 endfunction
 
 " Replace from col to cursor col with new characters
-function! coc#pum#repalce(col, insert, ...) abort
-  let insert = a:insert
-  let curr = getline('.')
-  let removed = strpart(curr, a:col - 1, col('.') - a:col)
-  let n = strchars(removed)
-  let start = coc#string#common_start(insert, removed)
-  let event = get(a:, 1, 0)
-  if start > 0
-    let n = n - start
-    let insert = strcharpart(a:insert, start)
-    if empty(insert) && n == 0 && !event
-      let n = 1
-      let insert = coc#string#last_character(a:insert)
-    endif
+function! coc#pum#replace(col, insert, delta) abort
+  if a:delta == 1
+    call feedkeys("\<right>", 'in')
   endif
-  let keys = repeat("\<bs>", n).insert
-  if len(keys)
-    if event
-      let previous =strpart(curr, 0, a:col - 1)
-      call coc#rpc#notify('PumInsert', [previous.a:insert])
-      let g:coc_feeding_keys = 1
-    endif
-    call feedkeys(keys, 'int')
-  endif
+  let saved_completeopt = &completeopt
+  noa set completeopt=noinsert,noselect
+  noa call complete(a:col, [{ 'empty': v:true, 'word': a:insert }])
+  noa call feedkeys("\<C-n>\<C-x>\<C-z>", 'n')
+execute 'noa set completeopt='.saved_completeopt
 endfunction
 
 " create or update pum with lines, CompleteOption and config.
@@ -379,7 +370,7 @@ function! coc#pum#create(lines, opt, config) abort
     return
   endif
   let s:reversed = get(a:config, 'reverse', 0) && config['row'] < 0
-  let s:virtual_text = s:virtual_text_support && a:opt['virtualText']
+  let s:virtual_text = get(a:opt, 'virtualText', v:false)
   let s:pum_size = len(a:lines)
   let s:pum_index = a:opt['index']
   let lnum = s:index_to_lnum(s:pum_index)
@@ -391,7 +382,7 @@ function! coc#pum#create(lines, opt, config) abort
         \ 'index': lnum - 1,
         \ 'focusable': v:false
         \ })
-  call extend(config, coc#dict#pick(a:config, ['highlight', 'rounded', 'highlights', 'winblend', 'shadow', 'border', 'borderhighlight']))
+  call extend(config, coc#dict#pick(a:config, ['highlight', 'rounded', 'highlights', 'winblend', 'shadow', 'border', 'borderhighlight', 'title']))
   if s:reversed
     for item in config['highlights']
       let item['lnum'] = s:pum_size - item['lnum'] - 1
@@ -413,7 +404,7 @@ function! coc#pum#create(lines, opt, config) abort
   if s:is_vim
     call popup_setoptions(s:pum_winid, { 'firstline': firstline })
   else
-    call coc#compat#execute(s:pum_winid, 'call winrestview({"lnum":'.lnum.',"topline":'.firstline.'})')
+    call win_execute(s:pum_winid, 'call winrestview({"lnum":'.lnum.',"topline":'.firstline.'})')
   endif
   call coc#dialog#place_sign(s:pum_bufnr, s:pum_index == -1 ? 0 : lnum)
   " content before col and content after cursor
@@ -426,8 +417,7 @@ function! coc#pum#create(lines, opt, config) abort
   call setwinvar(s:pum_winid, 'kind', 'pum')
   if !s:is_vim
     if s:pum_size > config['height']
-      redraw
-      call coc#float#nvim_scrollbar(s:pum_winid)
+      call timer_start(0,{ -> coc#float#nvim_scrollbar(s:pum_winid)})
     else
       call coc#float#close_related(s:pum_winid, 'scrollbar')
     endif
@@ -453,7 +443,7 @@ endfunction
 function! s:on_pum_change(move) abort
   if s:virtual_text
     if s:inserted
-      call s:clear_virtual_text()
+      call coc#pum#clear_vtext()
     else
       call s:insert_virtual_text()
     endif
@@ -546,7 +536,7 @@ function! s:select_line(winid, line) abort
   let s:pum_index = s:reversed ? (a:line == 0 ? -1 : s:pum_size - a:line) : a:line - 1
   let lnum = s:reversed ? (a:line == 0 ? s:pum_size : a:line) : max([1, a:line])
   if s:is_vim
-    call coc#compat#execute(a:winid, 'exe '.lnum)
+    call win_execute(a:winid, 'exe '.lnum)
   else
     call nvim_win_set_cursor(a:winid, [lnum, 0])
   endif
@@ -556,7 +546,7 @@ endfunction
 function! s:insert_virtual_text() abort
   let bufnr = bufnr('%')
   if !s:virtual_text || s:pum_index < 0
-    call s:clear_virtual_text()
+    call coc#pum#clear_vtext()
   else
     " Check if could create
     let insert = ''
@@ -592,20 +582,19 @@ function! s:insert_virtual_text() abort
   endif
 endfunction
 
-function! s:clear_virtual_text() abort
-  if s:virtual_text_support
-    if s:is_vim
-      if s:prop_id != 0
-        call prop_remove({'id': s:prop_id})
-      endif
-    else
-      call nvim_buf_clear_namespace(bufnr('%'), s:virtual_text_ns, 0, -1)
+function! coc#pum#clear_vtext() abort
+  if s:is_vim
+    if s:prop_id != 0
+      call prop_remove({'id': s:prop_id})
     endif
+    let s:prop_id = 0
+  else
+    call nvim_buf_clear_namespace(bufnr('%'), s:virtual_text_ns, 0, -1)
   endif
 endfunction
 
 function! s:close_pum() abort
-  call s:clear_virtual_text()
+  call coc#pum#clear_vtext()
   call coc#float#close(s:pum_winid, 1)
   let s:pum_winid = 0
   let s:pum_size = 0

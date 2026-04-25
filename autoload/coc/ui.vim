@@ -1,9 +1,11 @@
 let s:is_vim = !has('nvim')
 let s:is_win = has('win32') || has('win64')
 let s:is_mac = has('mac')
+let s:root = expand('<sfile>:h:h:h')
 let s:sign_api = exists('*sign_getplaced') && exists('*sign_place')
 let s:sign_groups = []
 let s:outline_preview_bufnr = 0
+let s:is_win32unix = has('win32unix')
 
 " Check <Tab> and <CR>
 function! coc#ui#check_pum_keymappings(trigger) abort
@@ -53,7 +55,7 @@ function! coc#ui#quickpick(title, items, cb) abort
       call a:cb(v:exception)
     endtry
   else
-    let res = inputlist([a:title] + a:items)
+    let res = inputlist([a:title] + map(range(1, len(a:items)), 'v:val . ". " . a:items[v:val - 1]'))
     call a:cb(v:null, res)
   endif
 endfunction
@@ -98,19 +100,20 @@ function! coc#ui#open_terminal(opts) abort
     endif
   endfunction
 
-  if has('nvim')
-    call termopen(cmd, {
-          \ 'cwd': cwd,
-          \ 'on_exit': {job, status -> s:OnExit(status)},
-          \})
-  else
+  if s:is_vim
     if s:is_win
-      let cmd = 'cmd.exe /C "'.cmd.'"'
+      let cmd = ['cmd.exe', '/C', cmd]
     endif
     call term_start(cmd, {
           \ 'cwd': cwd,
+          \ 'term_finish': 'close',
           \ 'exit_cb': {job, status -> s:OnExit(status)},
           \ 'curwin': 1,
+          \})
+  else
+    call termopen(cmd, {
+          \ 'cwd': cwd,
+          \ 'on_exit': {job, status -> s:OnExit(status)},
           \})
   endif
   if keepfocus
@@ -134,6 +137,19 @@ function! coc#ui#run_terminal(opts, cb)
   call coc#ui#open_terminal(opts)
 endfunction
 
+function! coc#ui#fix() abort
+  let file = s:root .. '/esbuild.js'
+  if filereadable(file)
+    let opts = {
+          \ 'cmd': 'npm ci',
+          \ 'cwd': s:root,
+          \ 'keepfocus': 1,
+          \ 'Callback': {_ -> execute('CocRestart')}
+          \}
+    call coc#ui#open_terminal(opts)
+  endif
+endfunction
+
 function! coc#ui#echo_hover(msg)
   echohl MoreMsg
   echo a:msg
@@ -150,7 +166,7 @@ function! coc#ui#echo_messages(hl, msgs)
     return
   endif
   execute 'echohl '.a:hl
-  echo join(msgs, "\n")
+  echom join(msgs, "\n")
   echohl None
 endfunction
 
@@ -175,30 +191,17 @@ endfunction
 function! coc#ui#open_files(files)
   let bufnrs = []
   " added on latest vim8
-  if exists('*bufadd') && exists('*bufload')
-    for file in a:files
-      let file = fnamemodify(file, ':.')
-      if bufloaded(file)
-        call add(bufnrs, bufnr(file))
-      else
-        let bufnr = bufadd(file)
-        call bufload(file)
-        call add(bufnrs, bufnr)
-        call setbufvar(bufnr, '&buflisted', 1)
-      endif
-    endfor
-  else
-    noa keepalt 1new +setl\ bufhidden=wipe
-    for file in a:files
-      let file = fnamemodify(file, ':.')
-      execute 'noa edit +setl\ bufhidden=hide '.fnameescape(file)
-      if &filetype ==# ''
-        filetype detect
-      endif
-      call add(bufnrs, bufnr('%'))
-    endfor
-    noa close
-  endif
+  for filepath in a:files
+    let file = fnamemodify(coc#util#node_to_win32unix(filepath), ':.')
+    if bufloaded(file)
+      call add(bufnrs, bufnr(file))
+    else
+      let bufnr = bufadd(file)
+      call bufload(file)
+      call add(bufnrs, bufnr)
+      call setbufvar(bufnr, '&buflisted', 1)
+    endif
+  endfor
   doautocmd BufEnter
   return bufnrs
 endfunction
@@ -262,68 +265,27 @@ function! s:system(cmd)
   return output
 endfunction
 
-function! coc#ui#set_lines(bufnr, changedtick, original, replacement, start, end, changes, cursor, col) abort
-  if !bufloaded(a:bufnr)
-    return
-  endif
-  let delta = 0
-  if !empty(a:col)
-    let delta = col('.') - a:col
-  endif
-  if getbufvar(a:bufnr, 'changedtick') > a:changedtick && bufnr('%') == a:bufnr
-    " try apply current line change
-    let lnum = line('.')
-    " change for current line
-    if a:end - a:start == 1 && a:end == lnum && len(a:replacement) == 1
-      let idx = a:start - lnum + 1
-      let previous = get(a:original, idx, 0)
-      if type(previous) == 1
-        let content = getline('.')
-        if previous !=# content
-          let diff = coc#string#diff(content, previous, col('.'))
-          let changed = get(a:replacement, idx, 0)
-          if type(changed) == 1 && strcharpart(previous, 0, diff['end']) ==# strcharpart(changed, 0, diff['end'])
-            let applied = coc#string#apply(changed, diff)
-            let replacement = copy(a:replacement)
-            let replacement[idx] = applied
-            call coc#compat#buf_set_lines(a:bufnr, a:start, a:end, replacement)
-            return
-          endif
-        endif
-      endif
+function! coc#ui#set_lines(bufnr, changedtick, original, replacement, start, end, changes, cursor, col, linecount) abort
+  try
+    if s:is_vim
+      call coc#vim9#Set_lines(a:bufnr, a:changedtick, a:original, a:replacement, a:start, a:end, a:changes, a:cursor, a:col, a:linecount)
+    else
+      call v:lua.require('coc.text').set_lines(a:bufnr, a:changedtick, a:original, a:replacement, a:start, a:end, a:changes, a:cursor, a:col, a:linecount)
     endif
-  endif
-  if exists('*nvim_buf_set_text') && !empty(a:changes)
-    for item in reverse(copy(a:changes))
-      call nvim_buf_set_text(a:bufnr, item[1], item[2], item[3], item[4], item[0])
-    endfor
-  else
-    call coc#compat#buf_set_lines(a:bufnr, a:start, a:end, a:replacement)
-  endif
-  if !empty(a:cursor)
-    call cursor(a:cursor[0], a:cursor[1] + delta)
-  endif
+  catch /.*/
+    " Need try catch here on vim9
+    call coc#compat#send_error('coc#ui#set_lines', s:is_vim)
+  endtry
 endfunction
 
 function! coc#ui#change_lines(bufnr, list) abort
-  if !bufloaded(a:bufnr) | return v:null | endif
-  undojoin
-  if exists('*setbufline')
-    for [lnum, line] in a:list
-      call setbufline(a:bufnr, lnum + 1, line)
-    endfor
-  elseif a:bufnr == bufnr('%')
-    for [lnum, line] in a:list
-      call setline(lnum + 1, line)
-    endfor
-  else
-    let bufnr = bufnr('%')
-    exe 'noa buffer '.a:bufnr
-    for [lnum, line] in a:list
-      call setline(lnum + 1, line)
-    endfor
-    exe 'noa buffer '.bufnr
+  if !bufloaded(a:bufnr)
+    return v:null
   endif
+  undojoin
+  for [lnum, line] in a:list
+    call setbufline(a:bufnr, lnum + 1, line)
+  endfor
 endfunction
 
 function! coc#ui#open_url(url)
@@ -351,18 +313,21 @@ function! coc#ui#open_url(url)
 endfunction
 
 function! coc#ui#rename_file(oldPath, newPath, write) abort
-  let bufnr = bufnr(a:oldPath)
+  let oldPath = coc#util#node_to_win32unix(a:oldPath)
+  let newPath =  coc#util#node_to_win32unix(a:newPath)
+  let bufnr = bufnr(oldPath)
   if bufnr == -1
-    throw 'Unable to get bufnr of '.a:oldPath
+    throw 'Unable to get bufnr of '.oldPath
   endif
-  if a:oldPath =~? a:newPath && (s:is_mac || s:is_win)
-    return coc#ui#safe_rename(bufnr, a:oldPath, a:newPath, a:write)
+  if oldPath =~? newPath && (s:is_mac || s:is_win || s:is_win32unix)
+    return coc#ui#safe_rename(bufnr, oldPath, newPath, a:write)
   endif
-  if bufloaded(a:newPath)
-    execute 'silent bdelete! '.bufnr(a:newPath)
+  if bufloaded(newPath)
+    execute 'silent bdelete! '.bufnr(newPath)
   endif
+  " TODO use nvim_buf_set_name instead
   let current = bufnr == bufnr('%')
-  let bufname = fnamemodify(a:newPath, ":~:.")
+  let bufname = fnamemodify(newPath, ":~:.")
   let filepath = fnamemodify(bufname(bufnr), '%:p')
   let winid = coc#compat#buf_win_id(bufnr)
   let curr = -1
@@ -372,10 +337,10 @@ function! coc#ui#rename_file(oldPath, newPath, write) abort
     execute 'keepalt tab drop '.fnameescape(bufname(bufnr))
     let winid = win_getid()
   endif
-  call coc#compat#execute(winid, 'keepalt file '.fnameescape(bufname), 'silent')
-  call coc#compat#execute(winid, 'doautocmd BufEnter')
+  call win_execute(winid, 'keepalt file '.fnameescape(bufname), 'silent')
+  call win_execute(winid, 'doautocmd BufEnter')
   if a:write
-    call coc#compat#execute(winid, 'noa write!', 'silent')
+    call win_execute(winid, 'noa write!', 'silent')
     call delete(filepath, '')
   endif
   if curr != -1
@@ -469,7 +434,7 @@ function! coc#ui#outline_preview(config) abort
   call setwinvar(result[0], 'kind', 'outline-preview')
   let s:outline_preview_bufnr = result[1]
   if !empty(filetype)
-    call coc#compat#execute(result[0], 'setfiletype '.filetype)
+    call win_execute(result[0], 'setfiletype '.filetype)
   endif
   return result[1]
 endfunction
@@ -485,7 +450,7 @@ endfunction
 function! coc#ui#safe_open(cmd, file) abort
   let bufname = fnameescape(a:file)
   try
-    execute a:cmd.' '.bufname
+    execute 'silent! '. a:cmd.' '.bufname
   catch /.*/
     if bufname('%') != bufname
       throw 'Error on open '. v:exception
@@ -495,13 +460,22 @@ endfunction
 
 " Use noa to setloclist, avoid BufWinEnter autocmd
 function! coc#ui#setloclist(nr, items, action, title) abort
+  let items = s:is_win32unix ? map(copy(a:items), 's:convert_qfitem(v:val)'): a:items
   if a:action ==# ' '
     let title = get(getloclist(a:nr, {'title': 1}), 'title', '')
     let action = title ==# a:title ? 'r' : ' '
-    noa call setloclist(a:nr, [], action, {'title': a:title, 'items': a:items})
+    noa call setloclist(a:nr, [], action, {'title': a:title, 'items': items})
   else
-    noa call setloclist(a:nr, [], a:action, {'title': a:title, 'items': a:items})
+    noa call setloclist(a:nr, [], a:action, {'title': a:title, 'items': items})
   endif
+endfunction
+
+function! s:convert_qfitem(item) abort
+  let result = copy(a:item)
+  if has_key(result, 'filename')
+    let result['filename'] = coc#util#node_to_win32unix(result['filename'])
+  endif
+  return result
 endfunction
 
 function! coc#ui#get_mouse() abort
@@ -520,7 +494,7 @@ endfunction
 function! coc#ui#create_tree(opts) abort
   let viewId = a:opts['viewId']
   let bufname = a:opts['bufname']
-  let tabid = coc#util#tabnr_id(tabpagenr())
+  let tabid = coc#compat#tabnr_id(tabpagenr())
   let winid = s:get_tree_winid(a:opts)
   let bufnr = a:opts['bufnr']
   if !bufloaded(bufnr)
@@ -555,7 +529,7 @@ function! s:get_tree_winid(opts) abort
     return winid
   endif
   if winid != -1
-    call coc#compat#execute(winid, 'noa close!', 'silent!')
+    call win_execute(winid, 'noa close!', 'silent!')
   endif
   return coc#window#find('cocViewId', viewId)
 endfunction

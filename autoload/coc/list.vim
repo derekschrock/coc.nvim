@@ -14,7 +14,6 @@ let s:filetype_map = {
       \ }
 let s:pwinid = -1
 let s:pbufnr = -1
-let s:match_ns = coc#highlight#create_namespace('list-match')
 let s:sign_range = 'CocCursorLine'
 let s:sign_popup_range = 'PopUpCocList'
 let s:current_line_hl = 'CocListCurrent'
@@ -78,6 +77,9 @@ function! coc#list#create(position, height, name, numberSelect)
     setl nonumber
     setl norelativenumber
   endif
+  if exists('&winfixbuf')
+    setl winfixbuf
+  endif
   setl colorcolumn=""
   return [bufnr('%'), win_getid(), tabpagenr()]
 endfunction
@@ -108,9 +110,7 @@ function! coc#list#setup(source)
     setl cursorline
     setl winhighlight=CursorLine:CocListLine
   endif
-  if has('nvim-0.5.0') || has('patch-8.1.0864')
-    setl scrolloff=0
-  endif
+  setl scrolloff=0
   setl filetype=list
   syntax case ignore
   let source = a:source[8:]
@@ -201,15 +201,7 @@ function! coc#list#scroll_preview(dir, floatPreview) abort
     endif
     return
   endif
-
-  if exists('*win_execute')
-    call win_execute(winid, "normal! ".(a:dir ==# 'up' ? "\<C-u>" : "\<C-d>"))
-  else
-    let id = win_getid()
-    noa call win_gotoid(winid)
-    execute "normal! ".(a:dir ==# 'up' ? "\<C-u>" : "\<C-d>")
-    noa call win_gotoid(id)
-  endif
+  call win_execute(winid, "normal! ".(a:dir ==# 'up' ? "\<C-u>" : "\<C-d>"))
 endfunction
 
 function! coc#list#close_preview(...) abort
@@ -378,20 +370,20 @@ function! s:preview_highlights(winid, bufnr, config, float) abort
   endif
   " highlights
   let sign_group = s:is_vim && a:float ? s:sign_popup_range : s:sign_range
-  call coc#compat#execute(a:winid, ['syntax clear', 'call clearmatches()'])
+  call win_execute(a:winid, ['syntax clear', 'call clearmatches()'])
   call sign_unplace(sign_group, {'buffer': a:bufnr})
   let lnum = get(a:config, 'lnum', 1)
   if !empty(filetype)
     if get(g:, 'coc_list_preview_filetype', 0)
-      call coc#compat#execute(a:winid, 'setf '.filetype)
+      call win_execute(a:winid, 'setf '.filetype)
     else
       let start = max([0, lnum - 300])
       let end = min([coc#compat#buf_line_count(a:bufnr), lnum + 300])
       call coc#highlight#highlight_lines(a:winid, [{'filetype': filetype, 'startLine': start, 'endLine': end}])
-      call coc#compat#execute(a:winid, 'syn sync fromstart')
+      call win_execute(a:winid, 'syn sync fromstart')
     endif
   else
-    call coc#compat#execute(a:winid, 'filetype detect')
+    call win_execute(a:winid, 'filetype detect')
     let ft = getbufvar(a:bufnr, '&filetype', '')
     if !empty(extname) && !empty(ft)
       let s:filetype_map[extname] = ft
@@ -456,7 +448,7 @@ function! s:save_views(exclude) abort
   for nr in range(1, winnr('$'))
     let winid = win_getid(nr)
     if winid != a:exclude && getwinvar(nr, 'previewwindow', 0) == 0 && !coc#window#is_float(winid)
-      call coc#compat#execute(winid, 'let w:coc_list_saved_view = winsaveview()')
+      call win_execute(winid, 'let w:coc_list_saved_view = winsaveview()')
     endif
   endfor
 endfunction
@@ -469,7 +461,7 @@ function! s:restore_views() abort
     let saved = getwinvar(nr, 'coc_list_saved_view', v:null)
     if !empty(saved)
       let winid = win_getid(nr)
-      call coc#compat#execute(winid, 'noa call winrestview(w:coc_list_saved_view) | unlet w:coc_list_saved_view')
+      call win_execute(winid, 'noa call winrestview(w:coc_list_saved_view) | unlet w:coc_list_saved_view')
     endif
   endfor
 endfunction

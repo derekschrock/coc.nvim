@@ -1,7 +1,5 @@
 scriptencoding utf-8
-let s:root = expand('<sfile>:h:h:h')
 let s:is_vim = !has('nvim')
-let s:is_win = has("win32") || has("win64")
 let s:clients = {}
 
 if get(g:, 'node_client_debug', 0)
@@ -43,27 +41,23 @@ function! s:start() dict
     return
   endif
   let tmpdir = fnamemodify(tempname(), ':p:h')
+  let env = { 'NODE_NO_WARNINGS': '1', 'TMPDIR': coc#util#win32unix_to_node(tmpdir)}
   if s:is_vim
-    if get(g:, 'node_client_debug', 0)
+    let env['VIM_NODE_RPC'] = 1
+    if get(g:, 'node_client_debug', 0) || $COC_VIM_CHANNEL_ENABLE == '1'
       let file = tmpdir . '/coc.log'
       call ch_logfile(file, 'w')
       echohl MoreMsg | echo '[coc.nvim] channel log to '.file | echohl None
     endif
     let options = {
+          \ 'noblock': 1,
           \ 'in_mode': 'json',
           \ 'out_mode': 'json',
           \ 'err_mode': 'nl',
           \ 'err_cb': {channel, message -> s:on_stderr(self.name, split(message, "\n"))},
           \ 'exit_cb': {channel, code -> s:on_exit(self.name, code)},
-          \ 'env': {
-            \ 'NODE_NO_WARNINGS': '1',
-            \ 'VIM_NODE_RPC': '1',
-            \ 'TMPDIR': tmpdir,
-          \ }
+          \ 'env': env
           \}
-    if has("patch-8.1.350")
-      let options['noblock'] = 1
-    endif
     let job = job_start(self.command, options)
     let status = job_status(job)
     if status !=# 'run'
@@ -71,42 +65,22 @@ function! s:start() dict
       echohl Error | echom 'Failed to start '.self.name.' service' | echohl None
       return
     endif
-    let self['running'] = 1
     let self['channel'] = job_getchannel(job)
   else
-    let original = {}
     let opts = {
           \ 'rpc': 1,
           \ 'on_stderr': {channel, msgs -> s:on_stderr(self.name, msgs)},
           \ 'on_exit': {channel, code -> s:on_exit(self.name, code)},
+          \ 'env': env
           \ }
-    if has('nvim-0.5.0')
-      " could use env option
-      let opts['env'] = {
-          \ 'NODE_NO_WARNINGS': '1',
-          \ 'TMPDIR': tmpdir
-          \ }
-    else
-      let original = {
-            \ 'NODE_NO_WARNINGS': getenv('NODE_NO_WARNINGS'),
-            \ 'TMPDIR': getenv('TMPDIR'),
-            \ }
-      call setenv('NODE_NO_WARNINGS', '1')
-      call setenv('TMPDIR', tmpdir)
-    endif
     let chan_id = jobstart(self.command, opts)
-    if !empty(original)
-      for key in keys(original)
-        call setenv(key, original[key])
-      endfor
-    endif
     if chan_id <= 0
       echohl Error | echom 'Failed to start '.self.name.' service' | echohl None
       return
     endif
     let self['chan_id'] = chan_id
-    let self['running'] = 1
   endif
+  let self['running'] = 1
 endfunction
 
 function! s:on_stderr(name, msgs)
@@ -367,10 +341,18 @@ endfunction
 
 function! coc#client#open_log()
   if !get(g:, 'node_client_debug', 0)
-    echohl Error | echon '[coc.nvim] use let g:node_client_debug = 1 in your vimrc to enable debug mode.' | echohl None
+    throw '[coc.nvim] use let g:node_client_debug = 1 in your vimrc to enable debug mode.'
     return
   endif
   execute 'vs '.s:logfile
+endfunction
+
+function! coc#client#get_log()
+  if !get(g:, 'node_client_debug', 0)
+    throw '[coc.nvim] use let g:node_client_debug = 1 in your vimrc to enable debug mode.'
+    return ''
+  endif
+  return s:logfile
 endfunction
 
 function! s:on_error(name, msgs) abort

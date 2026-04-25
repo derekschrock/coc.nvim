@@ -41,7 +41,7 @@ rl._ttyWrite = function (code, key) {
 }
 
 function createSequences(str) {
-  return '\033]51;' + str + '\x07'
+  return '\x1b]51;' + str + '\x07'
 }
 
 function send(args) {
@@ -81,6 +81,9 @@ function getKey(key) {
     }
     if (key.name == 'f') {
       return '<C-f>'
+    }
+    if (key.name == 't') {
+      return '<C-t>'
     }
     if (key.name == 'b') {
       return '<C-b>'

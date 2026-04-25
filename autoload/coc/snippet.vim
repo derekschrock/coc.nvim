@@ -2,9 +2,8 @@ scriptencoding utf-8
 let s:is_vim = !has('nvim')
 let s:map_next = 1
 let s:map_prev = 1
-let s:cmd_mapping = has('nvim') || has('patch-8.2.1978')
 
-function! coc#snippet#_select_mappings()
+function! coc#snippet#_select_mappings(bufnr)
   if !get(g:, 'coc_selectmode_mapping', 1)
     return
   endif
@@ -17,7 +16,7 @@ function! coc#snippet#_select_mappings()
         \ "v:val !~# '^s' && v:val !~# '^\\a*\\s*<\\S\\+>'"),
         \ "matchstr(v:val, '^\\a*\\s*\\zs\\S\\+')")
     silent! execute 'sunmap' map
-    silent! execute 'sunmap <buffer>' map
+    call coc#compat#buf_del_keymap(a:bufnr, 's', map)
   endfor
 
   " same behaviour of ultisnips
@@ -29,17 +28,21 @@ endfunction
 
 function! coc#snippet#show_choices(lnum, col, position, input) abort
   call coc#snippet#move(a:position)
-  call CocActionAsync('startCompletion', { 'source': '$words' })
+  call CocActionAsync('startCompletion', {
+          \ 'source': '$words',
+          \ 'col': a:col
+          \ })
   redraw
 endfunction
 
 function! coc#snippet#enable(...)
-  if get(b:, 'coc_snippet_active', 0) == 1
+  let bufnr = get(a:, 1, bufnr('%'))
+  if getbufvar(bufnr, 'coc_snippet_active', 0) == 1
     return
   endif
-  let complete = get(a:, 1, 0)
-  let b:coc_snippet_active = 1
-  call coc#snippet#_select_mappings()
+  let complete = get(a:, 2, 0)
+  call setbufvar(bufnr, 'coc_snippet_active', 1)
+  call coc#snippet#_select_mappings(bufnr)
   let nextkey = get(g:, 'coc_snippet_next', '<C-j>')
   let prevkey = get(g:, 'coc_snippet_prev', '<C-k>')
   if maparg(nextkey, 'i') =~# 'snippet'
@@ -50,16 +53,34 @@ function! coc#snippet#enable(...)
   endif
   if !empty(nextkey)
     if s:map_next
-      execute 'inoremap <buffer><nowait><silent>'.nextkey." <C-R>=coc#snippet#jump(1, ".complete.")<cr>"
+      call s:buf_add_keymap(bufnr, 'i', nextkey, "<Cmd>:call coc#snippet#jump(1, ".complete.")<cr>")
     endif
-    execute 'snoremap <buffer><nowait><silent>'.nextkey." <Esc>:call coc#snippet#jump(1, ".complete.")<cr>"
+    call s:buf_add_keymap(bufnr, 's', nextkey, "<Cmd>:call coc#snippet#jump(1, ".complete.")<cr>")
   endif
   if !empty(prevkey)
     if s:map_prev
-      execute 'inoremap <buffer><nowait><silent>'.prevkey." <C-R>=coc#snippet#jump(0, ".complete.")<cr>"
+      call s:buf_add_keymap(bufnr, 'i', prevkey, "<Cmd>:call coc#snippet#jump(0, ".complete.")<cr>")
     endif
-    execute 'snoremap <buffer><nowait><silent>'.prevkey." <Esc>:call coc#snippet#jump(0, ".complete.")<cr>"
+    call s:buf_add_keymap(bufnr, 's', prevkey, "<Cmd>:call coc#snippet#jump(0, ".complete.")<cr>")
   endif
+endfunction
+
+function! coc#snippet#disable(...)
+  let bufnr = get(a:, 1, bufnr('%'))
+  if getbufvar(bufnr, 'coc_snippet_active', 0) == 0
+    return
+  endif
+  call setbufvar(bufnr, 'coc_snippet_active', 0)
+  let nextkey = get(g:, 'coc_snippet_next', '<C-j>')
+  let prevkey = get(g:, 'coc_snippet_prev', '<C-k>')
+  if s:map_next
+    call coc#compat#buf_del_keymap(bufnr, 'i', nextkey)
+  endif
+  if s:map_prev
+    call coc#compat#buf_del_keymap(bufnr, 'i', prevkey)
+  endif
+  call coc#compat#buf_del_keymap(bufnr, 's', nextkey)
+  call coc#compat#buf_del_keymap(bufnr, 's', prevkey)
 endfunction
 
 function! coc#snippet#prev() abort
@@ -81,36 +102,20 @@ function! coc#snippet#jump(direction, complete) abort
     endif
     if coc#pum#visible()
       " Discard the return value, otherwise weird characters will be inserted
-      call coc#pum#confirm()
+      call coc#pum#close('confirm')
       return ''
     endif
   endif
+  call coc#pum#close()
   call coc#rpc#request(a:direction == 1 ? 'snippetNext' : 'snippetPrev', [])
   return ''
-endfunction
-
-function! coc#snippet#disable()
-  if get(b:, 'coc_snippet_active', 0) == 0
-    return
-  endif
-  let b:coc_snippet_active = 0
-  let nextkey = get(g:, 'coc_snippet_next', '<C-j>')
-  let prevkey = get(g:, 'coc_snippet_prev', '<C-k>')
-  if s:map_next
-    silent! execute 'iunmap <buffer> <silent> '.nextkey
-  endif
-  if s:map_prev
-    silent! execute 'iunmap <buffer> <silent> '.prevkey
-  endif
-  silent! execute 'sunmap <buffer> <silent> '.prevkey
-  silent! execute 'sunmap <buffer> <silent> '.nextkey
 endfunction
 
 function! coc#snippet#select(start, end, text) abort
   if coc#pum#visible()
     call coc#pum#close()
   endif
-  if mode() == 's'
+  if mode() ==? 's'
     call feedkeys("\<Esc>", 'in')
   endif
   if &selection ==# 'exclusive'
@@ -118,23 +123,28 @@ function! coc#snippet#select(start, end, text) abort
     call cursor([cursor[0], cursor[1]])
     let cmd = ''
     let cmd .= mode()[0] ==# 'i' ? "\<Esc>".(col('.') == 1 ? '' : 'l') : ''
-    let cmd .= printf('v%s', strchars(a:text) . 'l')
+    let cmd .= printf('zvv%s', strchars(a:text) . 'l')
     let cmd .= "\<C-g>"
   else
     let cursor = coc#snippet#to_cursor(a:end)
     call cursor([cursor[0], cursor[1] - 1])
     let len = strchars(a:text) - 1
     let cmd = ''
-    let cmd .= mode()[0] ==# 'i' ? "\<Esc>l" : ''
-    let cmd .= printf('v%s', len > 0 ? len . 'h' : '')
+    let cmd .= mode()[0] ==# 'i' ? "\<Esc>".(col('.') == 1 ? '' : 'l') : ''
+    let cmd .= printf('zvv%s', len > 0 ? len . 'h' : '')
     let cmd .= "o\<C-g>"
   endif
-  call feedkeys(cmd, 'n')
+  if s:is_vim
+    " Can't use 't' since the code of <esc> can be changed.
+    call feedkeys(cmd, 'n')
+  else
+    call feedkeys(cmd, 'nt')
+  endif
 endfunction
 
 function! coc#snippet#move(position) abort
   let m = mode()
-  if m == 's'
+  if m ==? 's'
     call feedkeys("\<Esc>", 'in')
   endif
   let pos = coc#snippet#to_cursor(a:position)
@@ -152,4 +162,9 @@ function! coc#snippet#to_cursor(position) abort
     return [a:position.line + 1, a:position.character + 1]
   endif
   return [a:position.line + 1, coc#string#byte_index(line, a:position.character) + 1]
+endfunction
+
+function! s:buf_add_keymap(bufnr, mode, lhs, rhs) abort
+  let opts = {'nowait': v:true, 'silent': v:true}
+  call coc#compat#buf_add_keymap(a:bufnr, a:mode, a:lhs, a:rhs, opts)
 endfunction
